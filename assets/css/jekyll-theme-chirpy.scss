@@ -1,7 +1,18 @@
 ---
 ---
 
-@import 'main';
+@use 'abstracts/variables' with (
+  $theme: '{{ site.theme_mode }}'
+);
+
+/* prettier-ignore */
+@use 'main
+{%- if jekyll.environment == 'production' -%}
+  .bundle
+{%- endif -%}
+';
+
+/* append your custom style below */
 
 /* ---------- Paleta red team ---------- */
 /* light = rojo profundo (se lee sobre blanco), dark = rojo neon sobre negro */
@@ -111,8 +122,6 @@ code.highlighter-rouge:not(.filepath) {
   border: 1px solid rgba(var(--neon), 0.3);
   border-radius: 2px;
 }
-
-
 
 /* ---------- Botones de ventana: ─  □  ✕ ---------- */
 @media (min-width: 576px) {
