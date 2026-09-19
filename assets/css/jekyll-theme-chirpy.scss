@@ -1,0 +1,162 @@
+---
+---
+
+@import 'main';
+
+/* ---------- Paleta red team ---------- */
+/* light = rojo profundo (se lee sobre blanco), dark = rojo neon sobre negro */
+html:not([data-mode]),
+html[data-mode='light'] {
+  --neon: 200, 0, 20;
+  --neon-glow: 0.28;
+  --neon-blur: 12px;
+}
+
+html[data-mode='dark'] {
+  --neon: 255, 45, 45;
+  --neon-glow: 0.5;
+  --neon-blur: 18px;
+  --highlight-bg-color: #0b0b0d; /* casi negro */
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-mode]) {
+    --neon: 255, 45, 45;
+    --neon-glow: 0.5;
+    --neon-blur: 18px;
+    --highlight-bg-color: #0b0b0d;
+  }
+}
+
+/* ---------- Contenedor del bloque ---------- */
+div[class^='language-'] {
+  position: relative;
+  border-radius: 2px;
+  box-shadow:
+    0 0 0 1px rgba(var(--neon), 0.35),
+    0 0 var(--neon-blur) rgba(var(--neon), var(--neon-glow));
+  transition: box-shadow 0.25s ease;
+
+  /* colores de la cabecera (puntos, texto del lenguaje) */
+  --code-header-muted-color: rgba(var(--neon), 0.7);
+  --code-header-text-color: rgb(var(--neon));
+}
+
+div[class^='language-']:hover {
+  box-shadow:
+    0 0 0 1px rgba(var(--neon), 0.6),
+    0 0 calc(var(--neon-blur) * 1.6) rgba(var(--neon), calc(var(--neon-glow) + 0.2));
+}
+
+/* ---------- Esquinas tipo mira (arriba-izq y abajo-der) ---------- */
+div[class^='language-']::before,
+div[class^='language-']::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  z-index: 2;
+  filter: drop-shadow(0 0 4px rgba(var(--neon), 0.9));
+  transition: width 0.25s ease, height 0.25s ease;
+}
+
+div[class^='language-']::before {
+  top: -3px;
+  left: -3px;
+  border-top: 2px solid rgb(var(--neon));
+  border-left: 2px solid rgb(var(--neon));
+}
+
+div[class^='language-']::after {
+  bottom: -3px;
+  right: -3px;
+  border-bottom: 2px solid rgb(var(--neon));
+  border-right: 2px solid rgb(var(--neon));
+}
+
+div[class^='language-']:hover::before,
+div[class^='language-']:hover::after {
+  width: 30px;
+  height: 30px;
+}
+
+/* ---------- Cabecera ---------- */
+.code-header {
+  background: linear-gradient(90deg, rgba(var(--neon), 0.22), transparent 65%);
+  border-bottom: 1px solid;
+  border-image: linear-gradient(90deg, rgb(var(--neon)), transparent 85%) 1;
+}
+
+/* ---------- Cuerpo del código ---------- */
+div[class^='language-'] .highlight {
+  border-radius: 0;
+  /* scanlines muy sutiles */
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(var(--neon), 0.04) 0,
+    rgba(var(--neon), 0.04) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.highlight .lineno {
+  color: rgba(var(--neon), 0.8);
+}
+
+/* ---------- Código en línea ---------- */
+code.highlighter-rouge:not(.filepath) {
+  background-color: rgba(var(--neon), 0.1);
+  border: 1px solid rgba(var(--neon), 0.3);
+  border-radius: 2px;
+}
+
+
+
+/* ---------- Botones de ventana: ─  □  ✕ ---------- */
+@media (min-width: 576px) {
+  div[class^='language-'] .code-header::before {
+    content: '';
+    display: inline-block;
+    width: 90px;
+    height: 20px;
+    margin-left: 1rem;
+    border-radius: 0;
+    background-color: transparent;
+    box-shadow: none;
+    filter: drop-shadow(0 0 3px rgba(var(--neon), 0.8));
+    transition: filter 0.25s ease;
+
+    background-repeat: no-repeat;
+    background-image:
+      /* minimizar ─ */
+      linear-gradient(rgb(var(--neon)), rgb(var(--neon))),
+      /* maximizar □ (cuatro lados) */
+      linear-gradient(rgb(var(--neon)), rgb(var(--neon))),
+      linear-gradient(rgb(var(--neon)), rgb(var(--neon))),
+      linear-gradient(rgb(var(--neon)), rgb(var(--neon))),
+      linear-gradient(rgb(var(--neon)), rgb(var(--neon))),
+      /* cerrar ✕ (dos diagonales) */
+      linear-gradient(45deg, transparent 43%, rgb(var(--neon)) 43%, rgb(var(--neon)) 57%, transparent 57%),
+      linear-gradient(-45deg, transparent 43%, rgb(var(--neon)) 43%, rgb(var(--neon)) 57%, transparent 57%);
+    background-size:
+      10px 2px,
+      10px 2px, 10px 2px, 2px 10px, 2px 10px,
+      10px 10px, 10px 10px;
+    background-position:
+      10px 13px,
+      40px 5px, 40px 13px, 40px 5px, 48px 5px,
+      70px 5px, 70px 5px;
+  }
+
+  /* al pasar el ratón por el bloque, los botones brillan más */
+  div[class^='language-']:hover .code-header::before {
+    filter: drop-shadow(0 0 6px rgba(var(--neon), 1));
+  }
+
+  /* recoloca el nombre del lenguaje con el nuevo ancho */
+  div[class^='language-'] .code-header span {
+    margin-left: calc((1rem + 90px) / 2 * -1);
+  }
+}
