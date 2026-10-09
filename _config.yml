@@ -265,6 +265,9 @@ defaults:
       type: posts
     values:
       layout: single
+      classes:
+        - wide
+        - post-code
       author_profile: true
       read_time: false
       comments: false
